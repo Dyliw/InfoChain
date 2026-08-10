@@ -1,0 +1,310 @@
+import hashlib
+import json
+import time
+from typing import Dict, Any, List, Optional
+from sqlalchemy.orm import Session
+from app.models.llm import LLMInteraction
+from app.models.user import User
+import openai  # or any other LLM provider
+from datetime import datetime
+
+class LLMService:
+    def __init__(self, model: str = "gpt-4"):
+        self.model = model
+        self.system_prompt = self._get_system_prompt()
+    
+    def _get_system_prompt(self) -> str:
+        return """You are the AI reasoning tutor for InfoChain, a Media and Information Literacy (MIL) learning platform.
+
+Your primary purpose is NOT to tell the user what to believe.
+Your purpose is to help the user understand how a conclusion can be justified from available evidence.
+
+CORE PRINCIPLE:
+Do not replace the user's judgment with your own.
+
+Help the user distinguish between:
+1. Directly supported evidence
+2. Interpretation
+3. Inference
+4. Opinion
+5. Prediction
+6. Unverified claims
+7. Missing information
+8. Contradictory evidence
+9. Uncertainty
+
+EPISTEMIC BEHAVIOR:
+- Never present an inference as a fact.
+- Never increase the certainty of a claim beyond the certainty supported by the available evidence.
+- Never treat the existence of a source as proof that the source is correct.
+- Never assume that a scientific study proves causation merely because it reports an association.
+- Never assume that a majority opinion makes a claim true.
+- Never assume that a claim is false merely because its source is unreliable.
+- Never treat AI-generated information as inherently reliable or unreliable.
+- When evidence is insufficient, explicitly allow the conclusion: "There is not enough information to determine this."
+- When sources disagree, do not automatically select a winner. Identify what they agree on, what they disagree on, and why the disagreement might exist.
+
+CONFIDENCE:
+Always distinguish between:
+- confidence in a source
+- confidence in an individual claim
+- confidence in the user's conclusion
+
+These are not equivalent.
+
+USER FEEDBACK:
+Do not merely say "correct" or "incorrect."
+Explain:
+- what the user preserved correctly;
+- what information they changed or omitted;
+- what inference they introduced;
+- what evidence they failed to consider;
+- what additional information would change the conclusion.
+
+TRANSPARENCY:
+Whenever your own output contains an inference, say so.
+Whenever you cannot verify something, say so.
+Never fabricate sources, quotations, studies, statistics, citations, experiments, or evidence.
+
+GOAL:
+The ideal outcome is not: "The user agrees with the AI."
+The ideal outcome is: "The user can explain why they reached their conclusion, what evidence supports it, how confident they should be, and what information could prove them wrong."
+"""
+
+    def _get_mode_prompt(self, mode: str) -> str:
+        mode_prompts = {
+            "LABORATORY": "You are in LABORATORY mode. Help the user experiment with claims and evidence. Encourage exploration and discovery.",
+            "ANALYZER": "You are in ANALYZER mode. Focus on breaking down claims into their component parts. Identify evidence, inferences, and assumptions.",
+            "COMPARATOR": "You are in COMPARATOR mode. Compare different sources and perspectives. Identify agreements, disagreements, and gaps.",
+            "INVESTIGATOR": "You are in INVESTIGATOR mode. Help the user investigate claims thoroughly. Guide them to find evidence and evaluate sources.",
+            "AI_AUDITOR": "You are in AI_AUDITOR mode. Audit AI-generated content. Identify hallucinations, biases, and limitations.",
+            "RELAY": "You are in RELAY mode. Help the user transmit information accurately. Identify what changes between transmissions.",
+            "REFLECTION": "You are in REFLECTION mode. Help the user reflect on their own reasoning process. Identify cognitive biases and assumptions."
+        }
+        return mode_prompts.get(mode, mode_prompts["LABORATORY"])
+
+    async def chat(
+        self, 
+        db: Session, 
+        user_id: str, 
+        message: str, 
+        mode: str = "LABORATORY",
+        context: Optional[Dict[str, Any]] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        
+        start_time = time.time()
+        
+        # Prepare messages
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self._get_mode_prompt(mode)}
+        ]
+        
+        if context:
+            messages.append({
+                "role": "system", 
+                "content": f"Context: {json.dumps(context, indent=2)}"
+            })
+        
+        if conversation_history:
+            messages.extend(conversation_history)
+        
+        messages.append({"role": "user", "content": message})
+        
+        # Call LLM (using OpenAI as example)
+        try:
+            response = await self._call_llm(messages)
+            response_time = int((time.time() - start_time) * 1000)
+            
+            # Save interaction
+            interaction = self._save_interaction(
+                db, user_id, "chat", 
+                message, response,
+                tokens_used=response.get("tokens_used", 0),
+                response_time=response_time,
+                metadata={"mode": mode, "context": context}
+            )
+            
+            return {
+                "response": response["content"],
+                "model": self.model,
+                "tokens_used": response.get("tokens_used", 0),
+                "response_time_ms": response_time,
+                "metadata": {
+                    "mode": mode,
+                    "interaction_id": str(interaction.id)
+                }
+            }
+        except Exception as e:
+            raise Exception(f"LLM call failed: {str(e)}")
+
+    async def _call_llm(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+        # This is a placeholder - implement with your actual LLM provider
+        # Example with OpenAI:
+        # response = await openai.ChatCompletion.acreate(
+        #     model=self.model,
+        #     messages=messages,
+        #     temperature=0.7
+        # )
+        # return {
+        #     "content": response.choices[0].message.content,
+        #     "tokens_used": response.usage.total_tokens
+        # }
+        
+        # Mock implementation for testing
+        mock_response = """I need to analyze this claim carefully. Let me break it down:
+
+1. What is directly supported? 
+2. What is being inferred?
+3. What evidence is missing?
+
+Based on the available information, I can say that..."""
+        
+        return {
+            "content": mock_response,
+            "tokens_used": 150
+        }
+
+    def _save_interaction(
+        self, 
+        db: Session, 
+        user_id: str, 
+        interaction_type: str,
+        prompt: str,
+        response: Dict[str, Any],
+        tokens_used: int,
+        response_time: int,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> LLMInteraction:
+        
+        # Create hash of input for deduplication
+        input_hash = hashlib.sha256(
+            f"{user_id}:{prompt}".encode()
+        ).hexdigest()[:128]
+        
+        interaction = LLMInteraction(
+            user_id=user_id,
+            interaction_type=interaction_type,
+            model=self.model,
+            input_hash=input_hash,
+            output_metadata={
+                "prompt": prompt,
+                "response": response["content"],
+                **metadata
+            } if metadata else {
+                "prompt": prompt,
+                "response": response["content"]
+            },
+            tokens_used=tokens_used,
+            response_time_ms=response_time
+        )
+        
+        db.add(interaction)
+        db.commit()
+        db.refresh(interaction)
+        return interaction
+
+    async def audit_response(
+        self,
+        db: Session,
+        user_id: str,
+        ai_response: str,
+        original_query: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        
+        audit_prompt = f"""You are an AI auditor. Analyze the following AI response for accuracy, bias, and reasoning quality.
+
+Original query: {original_query}
+
+AI response: {ai_response}
+
+Context: {json.dumps(context, indent=2) if context else "No additional context"}
+
+Please evaluate:
+1. Is the response accurate based on available evidence?
+2. Are there any hallucinations or fabrications?
+3. Are the inferences properly labeled as such?
+4. Is the confidence level appropriate?
+5. Are there any biases or assumptions?
+
+Provide a detailed audit with specific issues and corrections."""
+
+        messages = [
+            {"role": "system", "content": "You are an AI auditor specializing in evaluating AI-generated content for accuracy and reasoning quality."},
+            {"role": "user", "content": audit_prompt}
+        ]
+        
+        start_time = time.time()
+        response = await self._call_llm(messages)
+        response_time = int((time.time() - start_time) * 1000)
+        
+        # Parse audit response
+        audit_result = self._parse_audit_response(response["content"])
+        
+        # Save interaction
+        self._save_interaction(
+            db, user_id, "audit",
+            audit_prompt, response,
+            tokens_used=response.get("tokens_used", 0),
+            response_time=response_time,
+            metadata={"audit": audit_result}
+        )
+        
+        return audit_result
+
+    def _parse_audit_response(self, audit_text: str) -> Dict[str, Any]:
+        # Parse the audit response into structured data
+        # This is a simplified version - you'd want more robust parsing
+        return {
+            "is_accurate": True if "accurate" in audit_text.lower() else False,
+            "confidence_score": 85,  # Would extract from text
+            "issues": [
+                {"type": "hallucination", "description": "Example issue", "severity": "high"}
+            ],
+            "corrections": [
+                {"original": "Example", "corrected": "Corrected version", "reason": "Reason"}
+            ],
+            "reasoning": audit_text
+        }
+
+    async def process_feedback(
+        self,
+        db: Session,
+        user_id: str,
+        interaction_id: str,
+        correct_response: str,
+        feedback_type: str,
+        explanation: Optional[str] = None
+    ) -> Dict[str, Any]:
+        
+        # Get original interaction
+        interaction = db.query(LLMInteraction).filter(
+            LLMInteraction.id == interaction_id
+        ).first()
+        
+        if not interaction:
+            raise Exception("Interaction not found")
+        
+        # Update interaction with feedback
+        if interaction.evaluation is None:
+            interaction.evaluation = {}
+        
+        interaction.evaluation.update({
+            "feedback": {
+                "type": feedback_type,
+                "correct_response": correct_response,
+                "explanation": explanation,
+                "user_id": user_id,
+                "timestamp": datetime.now().isoformat()
+            }
+        })
+        
+        db.commit()
+        db.refresh(interaction)
+        
+        return {
+            "message": "Feedback recorded successfully",
+            "interaction_id": str(interaction.id)
+        }
